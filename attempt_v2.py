@@ -183,7 +183,6 @@ class Client:
         self._writer = writer
 
         self._is_connected = True
-        self._queue = bytearray()  # it is not actually a queue, more like buffer
 
         self.address = address
         self.port = port
@@ -216,10 +215,7 @@ class Client:
     def __str__(self) -> str:
         return self.irc_name
 
-    def enqueue(self, message: str) -> None:
-        self._queue.extend((message + "\r\n").encode())
-
-    async def force_send(self, message: str) -> None:
+    async def send(self, message: str) -> None:
         self.last_active = time.perf_counter()
 
         logging.debug(f"{self.irc_name} {self.address_tuple} <- {message!r}")
@@ -227,17 +223,8 @@ class Client:
         self._writer.write((message + "\r\n").encode())
         await self._writer.drain()
 
-    async def flush(self) -> None:
-        self.last_active = time.perf_counter()
-
-        logging.debug(f"{self.irc_name} {self.address_tuple} <- {self._queue!r}")
-
-        self._writer.write(self._queue)
-        await self._writer.drain()
-        self._queue.clear()
-
-    def send_irc_message(self, irc_code: IRCCommands, message: str) -> None:
-        self.enqueue(f":{SERVICE_URL} {irc_code:03} {self.safe_nick} {message}")
+    async def send_irc_message(self, irc_code: IRCCommands, message: str) -> None:
+        await self.send(f":{SERVICE_URL} {irc_code:03} {self.safe_nick} {message}")
 
     async def disconnect(self) -> None:
         self._is_connected = False
@@ -272,35 +259,34 @@ class Client:
                 if handler is not None:
                     await handler(*args)
 
-            if self._queue:
-                await self.flush()
-
-    def send_welcome_screen(self) -> None:
-        self.send_irc_message(IRCCommands.RPL_WELCOME, f":Welcome to the Akatsuki IRC!")
-        self.send_irc_message(IRCCommands.RPL_MOTDSTART, ":-")
+    async def send_welcome_screen(self) -> None:
+        await self.send_irc_message(
+            IRCCommands.RPL_WELCOME, f":Welcome to the Akatsuki IRC!"
+        )
+        await self.send_irc_message(IRCCommands.RPL_MOTDSTART, ":-")
 
         for line_motd in self._server.motd:
-            self.send_irc_message(IRCCommands.RPL_MOTD, f":- {line_motd}")
+            await self.send_irc_message(IRCCommands.RPL_MOTD, f":- {line_motd}")
 
-        self.send_irc_message(IRCCommands.RPL_ENDOFMOTD, ":-")
+        await self.send_irc_message(IRCCommands.RPL_ENDOFMOTD, ":-")
 
     async def notify_part_client(self, client: Client, channel: str) -> None:
-        await self.force_send(
+        await self.send(
             f":{client.irc_name} PART :{channel}",
         )
 
     async def notify_join_client(self, client: Client, channel: str) -> None:
-        await self.force_send(
+        await self.send(
             f":{client.irc_name} JOIN :{channel}",
         )
 
         match client.irc_prefix:
             case "@":
-                await self.force_send(
+                await self.send(
                     f":{client.irc_name} MODE {channel} +o {client.safe_nick}",
                 )
             case "+":
-                await self.force_send(
+                await self.send(
                     f":{client.irc_name} MODE {channel} +v {client.safe_nick}",
                 )
 
@@ -308,13 +294,13 @@ class Client:
         chan = self._server.channels.get(channel)
 
         if chan is None:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_NOSUCHCHANNEL, f"{channel} :No such channel {channel}"
             )
             return
 
         if chan not in self.channels or self not in chan.clients:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_NOTONCHANNEL, f"{channel} :You're not on that channel"
             )
             return
@@ -326,13 +312,13 @@ class Client:
         chan = self._server.channels.get(channel)
 
         if chan is None:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_NOSUCHCHANNEL, f"{channel} :No such channel {channel}"
             )
             return
 
         if self in chan.clients:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_TOOMANYCHANNELS,
                 f"{channel} :You're already on that channel",
             )
@@ -352,7 +338,7 @@ class Client:
         self.nick = nick
         self.safe_nick = underscored_name(nick)
 
-        self.send_welcome_screen()
+        await self.send_welcome_screen()
 
     async def handle_quit(self, *_) -> None:
         await self.disconnect()
@@ -362,7 +348,7 @@ class Client:
         self.last_active = time.perf_counter()
 
         ping_args = " ".join(args)
-        self.enqueue(f":{SERVICE_URL} PONG {ping_args}")
+        await self.send(f":{SERVICE_URL} PONG {ping_args}")
 
     async def handle_pass(self, *args) -> None:
         if not args:
@@ -375,18 +361,20 @@ class Client:
             return
 
         channel = args[0].strip()
-        self.send_irc_message(IRCCommands.RPL_ENDOFWHO, f"{channel} :End of /WHO list.")
+        await self.send_irc_message(
+            IRCCommands.RPL_ENDOFWHO, f"{channel} :End of /WHO list."
+        )
 
     async def handle_list(self, *_) -> None:
-        self.send_irc_message(IRCCommands.RPL_LISTSTART, "Channel :Users Name")
+        await self.send_irc_message(IRCCommands.RPL_LISTSTART, "Channel :Users Name")
 
         for channel in tuple(self._server.channels.values()):
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.RPL_LIST,
                 f"{channel.name} {len(channel)} :{channel.description}",
             )
 
-        self.send_irc_message(IRCCommands.RPL_LISTEND, ":End of /LIST")
+        await self.send_irc_message(IRCCommands.RPL_LISTEND, ":End of /LIST")
 
     async def handle_privmsg(self, *args) -> None:
         if not args:
@@ -427,14 +415,12 @@ class Client:
 
         if client.away_message:
             away_since = round(time.perf_counter() - client.away_since)
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.RPL_AWAY,
                 f"{client.nick} {away_since} :{client.away_message}",
             )
 
-        await client.force_send(
-            f":{self.irc_name} PRIVMSG {client.safe_nick} :{message}"
-        )
+        await client.send(f":{self.irc_name} PRIVMSG {client.safe_nick} :{message}")
 
     async def handle_away(self, *args) -> None:
         message = " ".join(args).strip(":")
@@ -442,14 +428,14 @@ class Client:
         if not message or self.away_message:
             self.away_message = ""
             self.away_since = 0
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.RPL_UNAWAY, ":You are no longer marked as being away"
             )
             return
 
         self.away_message = message
         self.away_since = time.perf_counter()
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_NOWAWAY, ":You have been marked as being away"
         )
 
@@ -461,14 +447,16 @@ class Client:
         chan = self._server.channels.get(channel)
 
         if not chan:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_NOTONCHANNEL, f"{channel} :You're not on that channel"
             )
             return
 
-        self.send_irc_message(IRCCommands.RPL_TOPIC, f"{chan.name} :{chan.description}")
+        await self.send_irc_message(
+            IRCCommands.RPL_TOPIC, f"{chan.name} :{chan.description}"
+        )
 
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_TOPIC_INFO,
             f"{chan.name} {BOT_NAME}!{SERVICE_IRC_SUFFIX} {int(chan.creation_time)}",
         )
@@ -484,11 +472,11 @@ class Client:
             return
 
         for client in chan.clients:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.RPL_NAMEREPLY, f"= {channel} :{client.prefixed_safe_name}"
             )
 
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_ENDOFNAMES, f"{channel} :End of /NAMES list."
         )
 
@@ -501,14 +489,14 @@ class Client:
         channel = self._server.channels.get(target)
 
         if not ourselves and not channel:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_USERSDONTMATCH, ":Can't change mode for other users"
             )
             return
 
         if channel is not None:
-            self.send_irc_message(IRCCommands.RPL_CHANNELMODEIS, f"{target} +nt")
-            self.send_irc_message(
+            await self.send_irc_message(IRCCommands.RPL_CHANNELMODEIS, f"{target} +nt")
+            await self.send_irc_message(
                 IRCCommands.RPL_CREATIONTIME, f"{target} {channel.creation_time}"
             )
             return
@@ -525,11 +513,11 @@ class Client:
         prefixed_mode = mode[0]
         match prefixed_mode:
             case "b":
-                self.send_irc_message(
+                await self.send_irc_message(
                     IRCCommands.RPL_ENDOFBANLIST, f"{target} :End of Channel Ban List"
                 )
             case "i":
-                self.enqueue(f":{self.irc_name} MODE {self.nick} :+i")
+                await self.send(f":{self.irc_name} MODE {self.nick} :+i")
 
     async def handle_whois(self, *args) -> None:
         if not args:
@@ -539,29 +527,29 @@ class Client:
         client = self._server.find_client_by_name(name)
 
         if client is None:
-            self.send_irc_message(
+            await self.send_irc_message(
                 IRCCommands.ERR_NOSUCHNICK, f"{name} :No such nick/channel"
             )
             return
 
         # TODO: use user id.
         user_url = f"https://akatsuki.gg/u/{client.safe_nick}"
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_WHOISUSER,
             f"{client.nick} {user_url} * :{user_url}",
         )
 
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_WHOISCHANNELS,
             f"{client.nick} :{' '.join(channel.name for channel in client.channels)}",
         )
 
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_WHOISSERVER,
             f"{client.nick} {SERVICE_URL} :Akatsuki IRC",
         )
 
-        self.send_irc_message(
+        await self.send_irc_message(
             IRCCommands.RPL_ENDOFWHOIS, f"{client.nick} :End of /WHOIS list."
         )
 
@@ -655,7 +643,7 @@ class IRCServerAsync:
 
     async def broadcast(self, message: str) -> None:
         for client in tuple(self.clients.values()):
-            await client.force_send(message)
+            await client.send(message)
 
     def find_client_by_name(self, name: str) -> Optional[Client]:
         underscored = underscored_name(name)
@@ -737,7 +725,7 @@ class Channel:
     ) -> None:
         for client in self.clients:
             if not include_sender and client != broadcaster:
-                await client.force_send(message)
+                await client.send(message)
 
     async def join(self, _client: Client) -> None:
         self.clients.add(_client)
